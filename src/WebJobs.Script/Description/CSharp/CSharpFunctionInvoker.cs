@@ -13,6 +13,7 @@ using System.Text;
 using System.Threading.Tasks;
 using Microsoft.Azure.WebJobs.Host;
 using Microsoft.Azure.WebJobs.Script.Binding;
+using Microsoft.Azure.WebJobs.Script.Diagnostics;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Scripting;
@@ -31,6 +32,8 @@ namespace Microsoft.Azure.WebJobs.Script.Description
         private readonly Collection<FunctionBinding> _inputBindings;
         private readonly Collection<FunctionBinding> _outputBindings;
         private readonly IFunctionEntryPointResolver _functionEntryPointResolver;
+        private readonly FunctionMetadata _functionMetadata;
+        private readonly IMetricsLogger _metrics;
 
         private MethodInfo _function;
         private CSharpFunctionSignature _functionSignature;
@@ -53,6 +56,8 @@ namespace Microsoft.Azure.WebJobs.Script.Description
             _inputBindings = inputBindings;
             _outputBindings = outputBindings;
             _triggerInputName = GetTriggerInputName(functionMetadata);
+            _functionMetadata = functionMetadata;
+            _metrics = host.ScriptConfig.HostConfig.GetService<IMetricsLogger>();
 
             InitializeFileWatcherIfEnabled();
             _resultProcessor = CreateResultProcessor();
@@ -148,6 +153,9 @@ namespace Microsoft.Azure.WebJobs.Script.Description
 
         public override async Task Invoke(object[] parameters)
         {
+            FunctionStartedEvent startedEvent = new FunctionStartedEvent(_functionMetadata);
+            _metrics.BeginEvent(startedEvent);
+
             try
             {
                 TraceWriter.Verbose("Function started");
@@ -172,9 +180,14 @@ namespace Microsoft.Azure.WebJobs.Script.Description
             }
             catch (Exception ex)
             {
+                startedEvent.Success = false;
                 TraceWriter.Error(ex.Message, ex);
                 TraceWriter.Verbose("Function completed (Failure)");
                 throw;
+            }
+            finally
+            {
+                _metrics.EndEvent(startedEvent);
             }
         }
 
