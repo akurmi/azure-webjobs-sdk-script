@@ -102,13 +102,14 @@ namespace WebJobs.Script.WebHost.Diagnostics
         private class FunctionActivityTracker : IDisposable
         {
             private readonly string executionId = Guid.NewGuid().ToString();
+            private readonly object functionMetricEventLockObject = new object();
             private DateTime startTime = DateTime.UtcNow;
             private ulong totalExecutionCount = 0;
-            private ulong runningFunctionCount = 0;
             private const int MetricEventIntervalInSeconds = 5;
             private CancellationTokenSource etwTaskcancellationSource = new CancellationTokenSource();
             private ConcurrentQueue<FunctionMetrics> functionMetricsQueue = new ConcurrentQueue<FunctionMetrics>();
-
+            private Dictionary<string, RunningFunctionInfo> runningFunctions = new Dictionary<string, RunningFunctionInfo>();
+            
             internal FunctionActivityTracker()
             {
                 Task.Run(
@@ -116,7 +117,7 @@ namespace WebJobs.Script.WebHost.Diagnostics
                     {
                         try
                         {
-                            int currentSecond = MetricEventIntervalInSeconds;
+                            int currentSecond = 0;
                             while (!etwTaskcancellationSource.Token.IsCancellationRequested)
                             {
                                 RaiseMetricsPerFunctionEvent();
@@ -124,6 +125,7 @@ namespace WebJobs.Script.WebHost.Diagnostics
                                 if (currentSecond >= MetricEventIntervalInSeconds)
                                 {
                                     RaiseMetricEtwEvent(ExecutionStage.InProgress);
+                                    RaiseFunctionMetricEvents();
                                     currentSecond = 0;
                                 }
 
@@ -143,7 +145,7 @@ namespace WebJobs.Script.WebHost.Diagnostics
             {
                 get
                 {
-                    return runningFunctionCount != 0;
+                    return runningFunctions.Count != 0;
                 }
             }
 
@@ -164,24 +166,39 @@ namespace WebJobs.Script.WebHost.Diagnostics
             internal void FunctionStarted(FunctionStartedEvent startedEvent)
             {
                 totalExecutionCount++;
-                runningFunctionCount++;
 
                 var metricEventPerFunction = new FunctionMetrics(startedEvent.FunctionMetadata.Name, ExecutionStage.Started, 0);
                 functionMetricsQueue.Enqueue(metricEventPerFunction);
+                var key = GetDictionaryKey(startedEvent.FunctionMetadata.Name, startedEvent.InvocationId);
+                if (!runningFunctions.ContainsKey(key))
+                {
+                    runningFunctions.Add(key, new RunningFunctionInfo(startedEvent.FunctionMetadata.Name, startedEvent.InvocationId, startedEvent.StartTime, startedEvent.Success));
+                }
             }
 
             internal void FunctionCompleted(FunctionStartedEvent completedEvent)
             {
-                if (runningFunctionCount > 0)
-                {
-                    runningFunctionCount--;
-                }
-
                 var functionStage = (completedEvent.Success == false) ? ExecutionStage.Failed : ExecutionStage.Succeeded;
                 long executionTimeInMS = (long)completedEvent.EndTime.Subtract(completedEvent.StartTime).TotalMilliseconds;
 
                 var monitoringEvent = new FunctionMetrics(completedEvent.FunctionMetadata.Name, functionStage, executionTimeInMS);
                 functionMetricsQueue.Enqueue(monitoringEvent);
+                var key = GetDictionaryKey(completedEvent.FunctionMetadata.Name, completedEvent.InvocationId);
+                if (runningFunctions.ContainsKey(key))
+                {
+                    lock (functionMetricEventLockObject)
+                    {
+                        if (runningFunctions.ContainsKey(key))
+                        {
+                            var functionInfo = runningFunctions[key];
+                            functionInfo.ExecutionStage = ExecutionStage.Finished;
+                            functionInfo.Success = completedEvent.Success;
+                            functionInfo.EndTime = completedEvent.EndTime;
+                            RaiseFunctionMetricEvent(functionInfo, runningFunctions.Keys.Count, completedEvent.EndTime);
+                            runningFunctions.Remove(key);
+                        }
+                    }
+                }
             }
 
             internal void StopEtwTaskAndRaiseFinishedEvent()
@@ -189,6 +206,42 @@ namespace WebJobs.Script.WebHost.Diagnostics
                 etwTaskcancellationSource.Cancel();
                 RaiseMetricsPerFunctionEvent();
                 RaiseMetricEtwEvent(ExecutionStage.Finished);
+            }
+
+            private void RaiseFunctionMetricEvents()
+            {
+                lock (functionMetricEventLockObject)
+                {
+                    var currentTime = DateTime.UtcNow;
+                    foreach (var runningFunctionPair in runningFunctions)
+                    {
+                        var runningFunctionInfo = runningFunctionPair.Value;
+                        RaiseFunctionMetricEvent(runningFunctionInfo, runningFunctions.Keys.Count, currentTime);
+                    }
+                }
+            }
+
+            private void RaiseFunctionMetricEvent(RunningFunctionInfo runningFunctionInfo, int concurrency, DateTime currentTime)
+            {
+                double executionTimespan = 0;
+                if (runningFunctionInfo.ExecutionStage == ExecutionStage.Finished)
+                {
+                    executionTimespan = (runningFunctionInfo.EndTime - runningFunctionInfo.StartTime).TotalMilliseconds;
+                }
+                else
+                {
+                    executionTimespan = (currentTime - runningFunctionInfo.StartTime).TotalMilliseconds;
+                }
+
+                MetricEventSource.Log.RaiseFunctionExecutionEvent(
+                    executionId,
+                    siteName,
+                    concurrency,
+                    runningFunctionInfo.Name,
+                    runningFunctionInfo.InvocationId.ToString(),
+                    runningFunctionInfo.ExecutionStage.ToString(),
+                    (ulong)executionTimespan,
+                    runningFunctionInfo.Success);
             }
 
             private void RaiseMetricEtwEvent(ExecutionStage executionStage)
@@ -201,6 +254,11 @@ namespace WebJobs.Script.WebHost.Diagnostics
             private static void WriteFunctionsMetricEvent(string executionId, ulong executionTimeSpan, ulong executionCount, string executionStage)
             {
                 MetricEventSource.Log.RaiseFunctionsMetricEvent(executionId, executionTimeSpan, executionCount, executionStage);
+            }
+
+            private static string GetDictionaryKey(string name, Guid invocationId)
+            {
+                return string.Format("{0}_{1}", name, invocationId.ToString());
             }
 
             private void RaiseMetricsPerFunctionEvent()
@@ -240,6 +298,25 @@ namespace WebJobs.Script.WebHost.Diagnostics
 
                 return queueSnapshot;
             }
+
+            private class RunningFunctionInfo
+            {                
+                public RunningFunctionInfo(string name, Guid invocationId, DateTime startTime, bool success, ExecutionStage executionStage = ExecutionStage.InProgress)
+                {
+                    this.Name = name;
+                    this.InvocationId = invocationId;
+                    this.StartTime = startTime;
+                    this.Success = success;
+                    this.ExecutionStage = executionStage;
+                }
+
+                public string Name { get; private set; }
+                public Guid InvocationId { get; private set; }
+                public DateTime StartTime { get; private set; }
+                public ExecutionStage ExecutionStage { get; set; }
+                public DateTime EndTime { get; set; }
+                public bool Success { get; set; }
+            }
         }
 
         [EventSource(Guid = "08D0D743-5C24-43F9-9723-98277CEA5F9B")]
@@ -271,6 +348,15 @@ namespace WebJobs.Script.WebHost.Diagnostics
                 if (IsEnabled())
                 {
                     WriteEvent(57908, siteName, functionName, inputBindings, outputBindings, scriptType, isDisabled);
+                }
+            }
+
+            [Event(57909, Level = EventLevel.Informational, Channel = EventChannel.Operational)]
+            public void RaiseFunctionExecutionEvent(string executionId, string siteName, int concurrency, string functionName, string invocationId, string executionStage, ulong executionTimeSpan, bool success)
+            {
+                if (IsEnabled())
+                {
+                    WriteEvent(57909, executionId, siteName, concurrency, functionName, invocationId, executionStage, executionTimeSpan, success);
                 }
             }
         }
