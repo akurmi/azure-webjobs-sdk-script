@@ -345,8 +345,8 @@ namespace Microsoft.Azure.WebJobs.Script
                 case BindingType.TimerTrigger:
                     bindingMetadata = binding.ToObject<TimerBindingMetadata>();
                     break;
-                case BindingType.EasyTable:
-                    bindingMetadata = binding.ToObject<EasyTableBindingMetadata>();
+                case BindingType.MobileTable:
+                    bindingMetadata = binding.ToObject<MobileTableBindingMetadata>();
                     break;
                 case BindingType.DocumentDB:
                     bindingMetadata = binding.ToObject<DocumentDBBindingMetadata>();
@@ -354,8 +354,8 @@ namespace Microsoft.Azure.WebJobs.Script
                 case BindingType.NotificationHub:
                     bindingMetadata = binding.ToObject<NotificationHubBindingMetadata>();
                     break;
-                case BindingType.ApiHub:
-                case BindingType.ApiHubTrigger:
+                case BindingType.ApiHubFile:
+                case BindingType.ApiHubFileTrigger:
                     bindingMetadata = binding.ToObject<ApiHubBindingMetadata>();
                     break;
             }
