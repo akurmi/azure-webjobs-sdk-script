@@ -48,7 +48,7 @@ namespace Microsoft.Azure.WebJobs.Script.Tests
             }
             
             await AwaitFunctionTasks(taskList);
-            Assert.Equal(concurrency, argsList.Count);
+            ValidateFunctionExecutionEventArgumentsList(argsList, concurrency);
         }
 
         [Fact]
@@ -72,20 +72,6 @@ namespace Microsoft.Azure.WebJobs.Script.Tests
                 string.Format("There are events with different execution id. List:{0} Invalid entries:{1}",
                     SerializeFunctionExecutionEventArguments(argsList),
                     SerializeFunctionExecutionEventArguments(invalidArgsList)));
-
-            Assert.True(argsList.Count >= concurrency * 2,
-                string.Format("Each function invocation should emit atleast two etw events. List:{0}", SerializeFunctionExecutionEventArguments(argsList)));
-
-            var uniqueInvocationIds = argsList.Select(i => i.InvocationId).Distinct().ToList();
-            // Each invocation should have atleast one 'InProgress' event
-            var invalidInvocationIds = uniqueInvocationIds.Where(
-                i => !argsList.Exists(arg => arg.InvocationId == i && arg.ExecutionStage == ExecutionStage.Finished.ToString())
-                        || !argsList.Exists(arg => arg.InvocationId == i && arg.ExecutionStage == ExecutionStage.InProgress.ToString())).ToList();
-
-            Assert.True(invalidInvocationIds.Count == 0,
-                string.Format("Each invocation should have atleast one 'InProgress' event. Invalid invocation ids:{0} List:{1}",
-                    string.Join(",", invalidInvocationIds),
-                    SerializeFunctionExecutionEventArguments(argsList)));
         }
 
         [Fact]
@@ -124,7 +110,7 @@ namespace Microsoft.Azure.WebJobs.Script.Tests
             // Let's make sure that the tracker is not running anymore
             await Task.Delay(TimeSpan.FromMilliseconds(MinimumRandomValueForLongRunningDurationInMs));
 
-            Assert.True(argsList[0].ExecutionId != argsList[1].ExecutionId, "Execution ids are same");
+            Assert.True(argsList[0].ExecutionId != argsList[argsList.Count - 1].ExecutionId, "Execution ids are same");
         }
 
         private static async Task AwaitFunctionTasks(List<Task> taskList)
