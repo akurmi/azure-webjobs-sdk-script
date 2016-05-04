@@ -20,7 +20,7 @@ namespace Microsoft.Azure.WebJobs.Script.Tests
     {
         private Random _randomNumberGenerator = new Random();
         private const int MinimumLongRunningDurationInMs = 2000;
-        private const int MinimumRandomValueForLongRunningDurationInMs = MinimumLongRunningDurationInMs + 200;
+        private const int MinimumRandomValueForLongRunningDurationInMs = MinimumLongRunningDurationInMs + MinimumLongRunningDurationInMs;
 
         [Fact]
         public async Task MetricsEventManager_BasicTest()
@@ -72,6 +72,20 @@ namespace Microsoft.Azure.WebJobs.Script.Tests
                 string.Format("There are events with different execution id. List:{0} Invalid entries:{1}",
                     SerializeFunctionExecutionEventArguments(argsList),
                     SerializeFunctionExecutionEventArguments(invalidArgsList)));
+
+            Assert.True(argsList.Count >= concurrency * 2,
+                string.Format("Each function invocation should emit atleast two etw events. List:{0}", SerializeFunctionExecutionEventArguments(argsList)));
+
+            var uniqueInvocationIds = argsList.Select(i => i.InvocationId).Distinct().ToList();
+            // Each invocation should have atleast one 'InProgress' event
+            var invalidInvocationIds = uniqueInvocationIds.Where(
+                i => !argsList.Exists(arg => arg.InvocationId == i && arg.ExecutionStage == ExecutionStage.Finished.ToString())
+                        || !argsList.Exists(arg => arg.InvocationId == i && arg.ExecutionStage == ExecutionStage.InProgress.ToString())).ToList();
+
+            Assert.True(invalidInvocationIds.Count == 0,
+                string.Format("Each invocation should have atleast one 'InProgress' event. Invalid invocation ids:{0} List:{1}",
+                    string.Join(",", invalidInvocationIds),
+                    SerializeFunctionExecutionEventArguments(argsList)));
         }
 
         [Fact]
@@ -195,8 +209,8 @@ namespace Microsoft.Azure.WebJobs.Script.Tests
                             hashes.Add(lastEvent.InvocationId);
                         }
 
-                        var minEventsExpected = Math.Floor((double)lastEvent.ExecutionTimeSpan / (double)MinimumLongRunningDurationInMs) - 1;
-                        var maxEventsExpected = Math.Ceiling((double)lastEvent.ExecutionTimeSpan / (double)MinimumLongRunningDurationInMs) + 1;
+                        var minEventsExpected = Math.Floor((double)lastEvent.ExecutionTimeSpan / (double)MinimumLongRunningDurationInMs) - 2;
+                        var maxEventsExpected = Math.Ceiling((double)lastEvent.ExecutionTimeSpan / (double)MinimumLongRunningDurationInMs) + 2;
                         // We should see atleast one InProgress event if it takes more than 5 seconds
                         if (lastEvent.ExecutionTimeSpan >= MinimumLongRunningDurationInMs
                             && (relatedEventIds.Count < minEventsExpected
